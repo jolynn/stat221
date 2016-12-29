@@ -1,209 +1,159 @@
-#!/usr/bin/env Rscript
-
-### Stat 221 Pset 3 
-### Question 1.4
+### stat221 problem set 4
 ### Xiaolin Zhuo
 
-library(MASS)
-library(coda)
 
-proposeN <- function(Y, N, s) {
-  # given data Y, N at current iteration, and std of proposal ditribution s, propose a new value for N
+logP2 <- function(X1, X2, L, a, r) { 
+  # given vectors X1, X2, L, index a (scalar), and dimension r (scalar)
+  # return the number proportional to conditional log likelihood of Xa 
   
-  return(max(max(Y), round(rnorm(1, mean=N, sd=s), 0))) # N must be integer and >= max[Y]
+  return(X2[a] * log(L[a+r]) - lfactorial(X2[a]) + sum(X1 * log(L[1:r])) - sum(lfactorial(X1)))
 }
 
+logPois <- function(x, lambda) {
+  # return the number proportional to log likelihood of Poisson(x, lambda)
+  return(x * log(lambda) - lfactorial(x))
+}
 
-prob <- function(Y, x, mu, s) {
-  # return probability of x in Normal with mu and std s
+network_mcmc <- function(Y, A, prior, iter=1.2e5, burnin=2e4, verbose=FALSE) {
   
-  if (x==max(Y)) {
-    return(pnorm(max(Y)+0.5, mean=mu, sd=s))
-  } else {
-    return(pnorm(x+0.5, mean=mu, sd=s) - pnorm(x-0.5, mean=mu, sd=s))
+  r <- nrow(A)
+  c <- ncol(A)
+  
+  # decompose matrix A
+  reorder <- qr(A)$pivot
+  A <- A[, reorder]
+  A1 <- A[, 1:r]
+  invA1 <- solve(A1)
+  A2 <- A[, (r+1):c]
+  
+  
+  # initialize vals of chain
+  X0 <- ipfp(Y, A, rgamma(c, 10, 10))
+  # all(A %*% X0 == Y)
+  L0 <- rgamma(c, shape=prior[["a"]]+X0+1, scale=prior[["b"]]+1)
+  
+  
+  # create empty matrices to store chains
+  drawsX <- matrix(NA, nrow=iter+burnin, ncol=c)
+  drawsL <- matrix(NA, nrow=iter+burnin, ncol=c) 
+  
+  # enter initial vals
+  drawsX[1, ] <- X0
+  drawsL[1, ] <- L0
+  
+  
+  if (verbose) {
+    print("X0")
+    print(drawsX[1, ])
+    print("L0")
+    print(drawsL[1, ])
   }
-}
-
-
-getAcceptRatio <- function(Y, N, newN, theta, sigma) {
-  # given data Y, N and theta at current iteration, new proposed value newN, and std of proposal ditribution s, 
-  # return acceptance ratio
   
-  # calculate the factor proportional to log-likelihood
-  n <- length(Y)
-  fN <- sum(log(choose(N, Y))) + n*N*log(1-theta) - log(N)
-  fnewN <- sum(log(choose(newN, Y))) + n*newN*log(1-theta) - log(newN)
   
-
-  return(exp(fnewN-fN)*prob(Y, x=N, mu=newN, s=sigma)/prob(Y, x=newN, mu=N, s=sigma))
-}
-
-
-drawSimul <- function(Y, ndraws=1e5, burnin=1e4, sigma=10) {
-  # adj is adjustment factor in proposal distribution in MH step
+  # store acceptance rates for each element of X2
+  accepts <- rep(0, c-r)
   
-  # set up data structure
-  M <- ndraws + burnin
-  chain <- matrix(NA, ncol=2, nrow=M)  # first col: N; second col: theta
-  
-  n <- length(Y)
-  N0 <- max(Y) + rpois(1, 10) # start each chain from a different init value
-  theta0 <- rbeta(1, sum(Y)+1, n*N0-sum(Y)+1)
-  chain[1,] <- c(N0, theta0)
-  print(paste("chain starts from N0=", N0, sep=""))
-  
-  # keep track of acceptance rate and correction rate 
-  # (cases in which if a new draw of N < max(Y), set N = max(Y))
-  naccept <- 0
-  ncorrect <- 0
   
   # loop for mcmc iterations
-  for (m in 2:M) {
+  for (t in 2:(iter+burnin)) {
+    #if (t %% 1000 == 0) cat(t, " ")
     
-    ###### update N ######
+    ###### draw X2 from uniform distribution ######
     
-    # draw new N
-    #newN <- max(max(Y), rpois(1, round(adj*chain[m-1,1], 0))) # N must be integer and >= max[Y]  
-    newN <- proposeN(Y, chain[m-1,1], sigma)
-
-    # calculate acceptance ratio
-    prob.accept <- getAcceptRatio(Y, chain[m-1,1], newN, chain[m-1, 2], sigma)
-    #print(c(m, round(chain[m-1,1], 0), round(chain[m-1,2], 3), prob.accept))
-  
-    if (runif(1) < prob.accept) {
-      chain[m,1] <- newN
-
-      # only count numbers of acceptance and corrections after burnin period
-      if (m > burnin) {
-        naccept <- naccept + 1  
-        ncorrect <- ncorrect + (newN == max(Y))
+    # retrieve lambdas from prev iteration
+    L <- drawsL[t-1, ]
+    
+    # place holders for current Xs
+    X1 <- rep(NA, r) 
+    X2 <- rep(NA, c-r)
+    
+    # place holders for newly drawn Xs
+    newX1 <- X1
+    newX2 <- X2
+    
+    # iterate through X2 elements
+    for (a in 1:(c-r)) { 
+      
+      # if we are drawing the first element in X2, copy Xs from prev iteration
+      # otherwise, copy the most recently updated Xs
+      if (is.na(X1[1])) { 
+        X1 <- drawsX[t-1, 1:r]
+        X2 <- drawsX[t-1, (r+1):c]
+        newX1 <- X1
+        newX2 <- X2
+      } else {
+        X1 <- newX1
+        X2 <- newX2
       }
       
-    } else {
-      chain[m,1] <- chain[m-1,1]
+      # derive bounds for Xa (ath element in X2)
+      A0 <- A2
+      A0[, a] <- 0
+      i <- which(A2[, a] == 1) # index i runs over the set of links whose counts include Xa
+      ub <- min(Y[i] - A0[i, ] %*% X2)
+      
+      # draw a new val of Xa
+      newX2[a] <- rpois(1, L[a+r]) 
+      #newX2[a]
+      
+      # compute X1 
+      newX1 <- invA1 %*% (Y - A2 %*% newX2)
+      #newX1
+      
+      # redraw Xa if its new value falls out of bounds or corresponding X1 are not all nonnegative
+      while (!(newX2[a] >= 0 & newX2[a] <= ub) | !(all(newX1 >= 0))) {
+        if (verbose & t %% 1000 == 0) {
+          print(paste(t, "redraw X2", a, round(X2[a], 2), "ub:", round(ub, 2), "new val:", round(newX2[a], 2)))
+        } 
+
+        newX2[a] <- rpois(1, L[a+r])
+        newX1 <- invA1 %*% (Y - A2 %*% newX2)
+      }
+      
+
+            
+      ###### accept or reject new val of Xa ######
+      
+      # calculate acceptance ratio
+      logRatio <- logP2(newX1, newX2, L, a, r) - logP2(X1, X2, L, a, r) + logPois(X2[a], L[a+r]) - logPois(newX2[a], L[a+r])
+                  
+      if (log(runif(1)) < logRatio) {
+        # accept: new val of X2[a] already in newX2
+        
+        if (t > burnin) accepts[a] <- accepts[a] + 1 # only record acceptance rates after burnin
+        
+      } else {
+        # reject: replace Xa with existing val
+        newX2[a] <- X2[a]
+        newX1 <- invA1 %*% (Y - A2 %*% newX2)
+        
+      }
+      
     }
     
+    # recalcualte new X1 after updating all vals in X2
+    newX1 <- invA1 %*% (Y - A2 %*% newX2)
     
-    ###### update theta ######
-    chain[m,2] <- rbeta(1, sum(Y)+1, n*chain[m,1]-sum(Y)+1)
+    # enter new X1 and new X2 into matrix
+    drawsX[t, ] <- c(newX1, newX2)
     
+    
+    
+    ###### draw lambdas from Gamma distribution ######
+    drawsL[t, ] <- rgamma(c, shape=prior[["a"]]+drawsX[t, ]+1, scale=prior[["b"]]+1)
+    
+    if (verbose & t %% 1000 == 0) {
+      print(paste("stored at iter", t))
+      print(drawsX[t, ])
+      print(drawsL[t, ])
+    }
+    
+        
   }
   
-  # set up return values
-  return(list(N=tail(chain[,1], ndraws), theta=tail(chain[,2], ndraws), 
-              burninN=head(chain[,1], burnin), burninTheta=head(chain[,2], burnin),
-              accept=naccept/ndraws, correct=ncorrect/ndraws))
+  return(list(X=tail(drawsX, iter), L=tail(drawsL, iter), accepts=accepts/iter))
   
 }
-
-
-# impala
-Y <- read.table("impala.txt", stringsAsFactors=F)
-Y
-Y <- as.numeric(Y[-1,])
-Y
-
-
-# adjust value of sigma of normal proposal distribution to ensure acceptance rate between 40%-60%
-
-adjustSigma <- function(Y, target=0.5) {
-  # run simulations using a range of sigma values and regress acceptance rate on sigma (i.e. step size)
-  # find the sigma value that corresponds to acceptance rate of 50%
-  
-  S <- c(1, seq(10, 100, 10)) # a range of sigma values
-  m <- matrix(NA, ncol=3, nrow=length(S)) # column names: sigma, acceptance rate, correction rate
-  
-  for (i in 1:length(S)) {
-    cat(i, " ")
-    set.seed(i)
-    res <- drawSimul(Y, sigma=S[i])
-    m[i,] <- c(S[i], res[["accept"]], res[["correct"]])
-  }
-  
-  print(m)
-  model <- lm(m[,2] ~ m[,1])
-  print(summary(model))
-  
-  # solve for sigmal that corresponds to 50% acceptance rate
-  print(as.numeric((target - coef(model)[1])/coef(model)[2]))
-}
-
-adjustSigma(Y)
-
-
-
-# draw 10 chains. draw scatterplots of posterior simulations
-for (i in 1:10) {
-  cat(i, " ")
-  
-  set.seed(i)
-  res <- drawSimul(Y, sigma=15)
-  print(res[["accept"]])
-  
-  ### plot scatterplot of posterior distribution
-  pdf(paste("xiaolinzhuo_ps3_fig", i, ".pdf", sep=""))
-  plot(res[["N"]], res[["theta"]], xlab="N", ylab=expression(theta), ylim=c(0,1),
-       main=bquote(paste("Posterior simulations of (N, ", theta, "), chain #", .(i))))
-  contour(kde2d(res[["N"]], res[["theta"]]), nlevels=10, col="red", lwd=2, add=T) # add contour lines
-  dev.off()
-  
-  ### diagnostic plots: traceplots and autocorrelation plots
-  
-  # traceplots with burnin
-  plot(c(res[["burninN"]], res[["N"]]), type="l", xlab="Iteration", ylab="N", main="Traceplot of N")
-  plot(c(res[["burninTheta"]], res[["theta"]]), type="l", xlab="Iteration", ylab=expression(theta), 
-       main=expression(paste("Traceplot of ", theta))) 
-  
-  # autocorrelation plots
-  plot(acf(res[["N"]], lag.max=5000), main="Autocorrletion plot of N")
-  plot(acf(res[["theta"]], lag.max=5000), main=expression(paste("Autocorrletion plot of ", theta)))
-  
-  # save posterior distribution
-  write.csv(data.frame(N=res[["N"]], theta=res[["theta"]]), file=paste("impala_", i, ".csv", sep=""), row.names=F)
-}
-
-
-
-
-# waterbuck
-Y <- read.table("waterbuck.txt", stringsAsFactors=F)
-Y
-Y <- as.numeric(Y[-1,])
-Y
-
-# adjust sigma
-adjustSigma(Y)
-
-# draw 10 chains. draw scatterplots of posterior simulations
-for (i in 1:10) {
-  cat(i, " ")
-  
-  set.seed(i)
-  res <- drawSimul(Y, sigma=40)
-  print(res[["accept"]])
-  
-  ### plot scatterplot of posterior distribution
-  pdf(paste("xiaolinzhuo_ps3_fig", i+10, ".pdf", sep=""))
-  plot(res[["N"]], res[["theta"]], xlab="N", ylab=expression(theta), ylim=c(0,1),
-       main=bquote(paste("Posterior simulations of (N, ", theta, "), chain #", .(i))))
-  contour(kde2d(res[["N"]], res[["theta"]]), nlevels=10, col="red", lwd=2, add=T) # add contour lines
-  dev.off()
-    
-  ### diagnostic plots: traceplots and autocorrelation plots
-  
-  # traceplots with burnin
-  plot(c(res[["burninN"]], res[["N"]]), type="l", xlab="Iteration", ylab="N", main="Traceplot of N")
-  plot(c(res[["burninTheta"]], res[["theta"]]), type="l", xlab="Iteration", ylab=expression(theta), 
-       main=expression(paste("Traceplot of ", theta))) 
-  
-  # autocorrelation plots
-  plot(acf(res[["N"]], lag.max=5000), main="Autocorrletion plot of N")
-  plot(acf(res[["theta"]], lag.max=5000), main=expression(paste("Autocorrletion plot of ", theta)))
-  
-  # save posterior distribution
-  write.csv(data.frame(N=res[["N"]], theta=res[["theta"]]), file=paste("waterbuck_", i, ".csv", sep=""), row.names=F)
-}
-
 
 
 
