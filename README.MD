@@ -3,7 +3,7 @@ Problem sets and final project codes for Harvard statistics course stat221 "comp
 
 The problem sets involve replicating results from the following papers:
 
-Raftery (1988) - implements MCMC approrach to derive Bonimial distribution parameters (N, theta)
+Raftery (1988) - implements MCMC approrach to derive Binomial distribution parameters (N, theta)
 
 Tebaldi & West (JASA, 1998) - implements MCMC algorithms to infer origin-destination (OD) flows from link loads in a communication network, assuming that unobserved OD flows follow Poisson distributions
 
